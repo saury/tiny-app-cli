@@ -1,14 +1,14 @@
 {
-  "name": "tiny-app-cli",
+  "name": "@saury/tiny-app-cli",
   "type": "module",
   "version": "2.0.0",
   "packageManager": "pnpm@8.6.12",
   "description": "自动提审与发布微信、支付宝小程序, 更好的实现小程序的CI/CD",
-  "author": "penghongkun <https://github.com/phk422>",
+  "author": "saury <https://github.com/saury>",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/phk422/tiny-app-cli"
+    "url": "git+https://github.com/saury/tiny-app-cli"
   },
   "keywords": [
     "alipay",

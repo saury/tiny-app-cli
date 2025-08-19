@@ -4,17 +4,17 @@
 ## 安装
 With NPM:
 ```bash
-npm install -g tiny-app-cli
+npm install -g @saury/tiny-app-cli
 ```
 
 With PNPM:
 ```bash
-pnpm install -g tiny-app-cli
+pnpm install -g @saury/tiny-app-cli
 ```
 
 With Yarn:
 ```bash
-yarn add -g tiny-app-cli
+yarn add -g @saury/tiny-app-cli
 ```
 
 ## 如何使用？
@@ -54,4 +54,4 @@ tiny-app-cli -p weixin -a release
 ## 更多功能正在设计中...
 
 ## 其他
-如果有任何问题，欢迎提 [issue](https://github.com/phk422/tiny-app-cli/issues) 或者 [PR](https://github.com/phk422/tiny-app-cli/pulls)!
+如果有任何问题，欢迎提 [issue](https://github.com/saury/tiny-app-cli/issues) 或者 [PR](https://github.com/saury/tiny-app-cli/pulls)!

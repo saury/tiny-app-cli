@@ -1,5 +1,5 @@
 import process from 'node:process'
-import { yellow } from 'kolorist'
+import { blue, green, yellow } from 'kolorist'
 import type { Browser, Page } from 'puppeteer'
 import puppeteer from 'puppeteer'
 import type { Ora } from 'ora'
@@ -56,6 +56,214 @@ export async function getLoginScanCode(opts: InputOptions = options) {
 }
 
 /**
+ * 操作完成后检查并切换账号
+ */
+export async function checkAndSwitchAccountAfterOperation(): Promise<boolean> {
+  try {
+    // 等待页面加载完成
+    await sleep(2000)
+
+    // 检查是否存在切换账号按钮
+    const switchAccountBtn = await page.$('#js_container_box > div.col_side.open.transparent > div > div.menu_box_other > div.menu_box_other_item_wrapper.account_info > div > div.menu_box_account_info > div.menu_box_account_info_item')
+
+    if (!switchAccountBtn) {
+      // 尝试其他可能的选择器
+      const altSwitchBtn = await page.$('.menu_box_account_info_item')
+      if (!altSwitchBtn) {
+        spinner.stop()
+        // 没有切换账号按钮，直接询问是否继续
+        const shouldContinue: prompts.Answers<'continue'> = await prompts([
+          {
+            type: 'confirm',
+            name: 'continue',
+            message: '是否继续对当前账号进行其他操作？',
+            initial: false,
+          },
+        ], {
+          onCancel,
+        })
+        return shouldContinue.continue as boolean
+      }
+    }
+
+    // 获取当前账号信息
+    const currentAccountName = await page.evaluate(() => {
+      const accountElement = document.querySelector('#js_container_box > div.col_side.open.transparent > div > div.menu_box_other > div.menu_box_other_item_wrapper.account_info > div > div.menu_box_account_info > div.menu_box_account_info_item')
+      return accountElement?.textContent?.trim() || '当前账号'
+    })
+
+    spinner.stop()
+
+    // 询问用户下一步操作
+    const nextAction: prompts.Answers<'action'> = await prompts([
+      {
+        type: 'select',
+        name: 'action',
+        message: `当前账号: ${green(currentAccountName)}，请选择下一步操作:`,
+        choices: [
+          { title: '🔄 切换到其他账号继续操作', value: 'switch' },
+          { title: '🔁 继续使用当前账号进行操作', value: 'continue' },
+          { title: '🚪 退出程序', value: 'exit' },
+        ],
+        initial: 0,
+      },
+    ], {
+      onCancel,
+    })
+
+    if (nextAction.action === 'exit')
+      return false
+
+    if (nextAction.action === 'continue')
+      return true
+
+    // 执行切换账号逻辑
+    return await performAccountSwitch()
+  }
+  catch (error) {
+    spinner.warn(`检查账号切换过程中出现问题: ${(error as { message: string })?.message}`)
+    // 出错时询问是否继续
+    const shouldContinue: prompts.Answers<'continue'> = await prompts([
+      {
+        type: 'confirm',
+        name: 'continue',
+        message: '是否继续使用当前账号？',
+        initial: true,
+      },
+    ], {
+      onCancel,
+    })
+    return shouldContinue.continue as boolean
+  }
+}
+
+/**
+ * 执行账号切换
+ */
+async function performAccountSwitch(): Promise<boolean> {
+  try {
+    // 点击切换账号按钮
+    let clickSuccess = await page.evaluate(() => {
+      const btn = document.querySelector('#js_container_box > div.col_side.open.transparent > div > div.menu_box_other > div.menu_box_other_item_wrapper.account_info > div > div.menu_box_account_info > div.menu_box_account_info_item') as HTMLElement
+      if (btn) {
+        btn.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        setTimeout(() => btn.click(), 300)
+        return true
+      }
+      return false
+    })
+
+    // 如果主选择器失败，尝试备用选择器
+    if (!clickSuccess) {
+      clickSuccess = await page.evaluate(() => {
+        const btn = document.querySelector('.menu_box_account_info_item') as HTMLElement
+        if (btn) {
+          btn.scrollIntoView({ behavior: 'smooth', block: 'center' })
+          setTimeout(() => btn.click(), 300)
+          return true
+        }
+        return false
+      })
+    }
+
+    if (!clickSuccess)
+      throw new Error('无法点击切换账号按钮')
+
+    await sleep(1500)
+
+    // 等待账号列表弹窗出现
+    const accountList = await page.waitForSelector('#app > div.switch_account_dialog > div > div.account_list', { timeout: 10000 })
+    if (!accountList) {
+      spinner.warn('未找到账号列表')
+      return false
+    }
+
+    // 获取所有可切换的账号
+    const accounts = await page.evaluate(() => {
+      const accountItems = document.querySelectorAll('#app > div.switch_account_dialog > div > div.account_list > div.account_item')
+      return Array.from(accountItems).map((item, index) => {
+        const nameElement = item.querySelector('.account_name')
+        const emailElement = item.querySelector('.account_email')
+        const name = nameElement?.textContent?.trim() || `账号${index + 1}`
+        const email = emailElement?.textContent?.trim() || ''
+        return {
+          name,
+          email,
+          index,
+          display: email ? `${name} (${email})` : name,
+        }
+      })
+    })
+
+    if (accounts.length === 0) {
+      spinner.warn('未找到可切换的账号')
+      return false
+    }
+
+    // 让用户选择要切换的账号
+    const selectedAccount: prompts.Answers<'accountIndex'> = await prompts([
+      {
+        type: 'select',
+        name: 'accountIndex',
+        message: '请选择要切换的账号:',
+        choices: accounts.map((account, index) => ({
+          title: blue(account.display),
+          description: account.email ? `邮箱: ${account.email}` : '',
+          value: index,
+        })),
+        initial: 0,
+      },
+    ], {
+      onCancel,
+    })
+
+    // 点击选中的账号
+    await page.evaluate((index: number) => {
+      const accountItems = document.querySelectorAll('#app > div.switch_account_dialog > div > div.account_list > div.account_item')
+      const selectedItem = accountItems[index] as HTMLElement
+      if (selectedItem) {
+        selectedItem.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        setTimeout(() => {
+          selectedItem.click()
+        }, 300)
+      }
+    }, selectedAccount.accountIndex)
+
+    spinner.start('正在切换账号...')
+
+    // 等待账号切换弹窗消失
+    try {
+      await page.waitForSelector('#app > div.switch_account_dialog', { hidden: true, timeout: 15000 })
+    }
+    catch (error) {
+      await page.waitForFunction(() => {
+        const dialog = document.querySelector('#app > div.switch_account_dialog')
+        const loadingElements = document.querySelectorAll('.loading')
+        const hasVisibleLoading = Array.from(loadingElements).some(el =>
+          (el as HTMLElement).style.display !== 'none' && (el as HTMLElement).offsetParent !== null,
+        )
+        return !dialog || !hasVisibleLoading
+      }, { timeout: 30000 })
+    }
+
+    await sleep(3000)
+
+    // 获取切换后的账号名称
+    const newAccountName = await page.evaluate(() => {
+      const accountElement = document.querySelector('#js_container_box > div.col_side.open.transparent > div > div.menu_box_other > div.menu_box_other_item_wrapper.account_info > div > div.menu_box_account_info > div.menu_box_account_info_item')
+      return accountElement?.textContent?.trim() || '新账号'
+    })
+
+    spinner.succeed(`账号切换成功: ${green(newAccountName)}`)
+    return true
+  }
+  catch (error) {
+    spinner.warn(`切换账号失败: ${(error as { message: string })?.message}`)
+    return false
+  }
+}
+
+/**
  * 跳转到版本列表
  */
 export async function jumpToVersions() {
@@ -78,10 +286,35 @@ async function getSubmitReviewButton() {
   if (codeVersions.length > 1) {
     for await (const item of codeVersions) {
       const hasExpVersionTag = await item.evaluate(el => el.querySelector('.js_show_exp_version') !== null)
-      if (hasExpVersionTag)
+      if (hasExpVersionTag) {
         submitReviewBtn = await item.$('.weui-desktop-btn.weui-desktop-btn_primary')
+
+        // 如果找到体验版，重新获取该版本的详细信息
+        const expVersionInfo = await item.evaluate((el) => {
+          const versionElements = el.querySelectorAll('.simple_preview_item')
+          let versionNumber = ''
+
+          for (const element of versionElements) {
+            const label = element.querySelector('.simple_preview_label')
+            if (label && label.textContent?.includes('版本号')) {
+              const valueElement = element.querySelector('.simple_preview_value')
+              if (valueElement) {
+                const textContent = valueElement.textContent || ''
+                versionNumber = textContent.trim().split('\n')[0].trim()
+              }
+              break
+            }
+          }
+
+          return versionNumber
+        })
+
+        if (expVersionInfo)
+          spinner.info(`选择体验版进行提审: ${green(expVersionInfo)} (${blue('体验版')})`)
+      }
     }
   }
+
   return submitReviewBtn
 }
 
@@ -110,10 +343,13 @@ export async function jumpToConfirmPage() {
       ], {
         onCancel,
       })
-      if (!result.forceSubmit)
-        throw new Error('退出提审')
-      else
+      if (!result.forceSubmit) {
+        spinner.info('用户取消提审操作')
+        throw new Error('用户取消提审')
+      }
+      else {
         spinner.start()
+      }
     }
   }
   if (isSubmitReviewBtnDisabled) {
@@ -233,14 +469,89 @@ export default async function weixinRobot(opts: InputOptions) {
   options = opts
   try {
     await getLoginScanCode()
-    await jumpToVersions()
-    if (options.action === ACTION.REVIEW) {
-      await jumpToConfirmPage()
-      await toSubmitAudit()
+
+    // 主操作循环，允许用户在完成操作后切换账号继续操作
+    while (true) {
+      try {
+        await jumpToVersions()
+
+        if (options.action === ACTION.REVIEW) {
+          await jumpToConfirmPage()
+          await toSubmitAudit()
+          spinner.succeed('✅ 提审操作完成')
+        }
+        else {
+          await toRelease()
+          spinner.succeed('✅ 发布操作完成')
+        }
+
+        // 跳转到getcodepage
+        const token = new URL(page.url()).searchParams.get('token')
+        await page.goto(`https://mp.weixin.qq.com/wxamp/wacodepage/getcodepage?token=${token}&lang=zh_CN`)
+
+        // 操作完成后询问是否切换账号继续操作
+        const shouldContinue = await checkAndSwitchAccountAfterOperation()
+        if (!shouldContinue) {
+          spinner.info('程序结束，感谢使用！')
+          break
+        }
+      }
+      catch (error) {
+        const errorMessage = (error as { message: string })?.message || '未知错误'
+
+        // 如果是用户取消操作，询问是否切换账号或退出
+        if (errorMessage.includes('用户取消')) {
+          spinner.stop()
+          const nextAction: prompts.Answers<'action'> = await prompts([
+            {
+              type: 'select',
+              name: 'action',
+              message: '操作已取消，请选择下一步:',
+              choices: [
+                { title: '🔄 切换到其他账号继续操作', value: 'switch' },
+                { title: '🔁 继续使用当前账号进行操作', value: 'continue' },
+                { title: '🚪 退出程序', value: 'exit' },
+              ],
+              initial: 1, // 默认选择继续当前账号
+            },
+          ], {
+            onCancel,
+          })
+
+          if (nextAction.action === 'exit') {
+            spinner.info('程序结束，感谢使用！')
+            break
+          }
+          else if (nextAction.action === 'switch') {
+            const switchSuccess = await performAccountSwitch()
+            if (!switchSuccess) {
+              // 切换失败，询问是否继续
+              const shouldContinue: prompts.Answers<'continue'> = await prompts([
+                {
+                  type: 'confirm',
+                  name: 'continue',
+                  message: '切换账号失败，是否继续使用当前账号？',
+                  initial: true,
+                },
+              ], {
+                onCancel,
+              })
+              if (!shouldContinue.continue) {
+                spinner.info('程序结束，感谢使用！')
+                break
+              }
+            }
+          }
+          // 如果选择 continue 或切换成功，继续循环
+          continue
+        }
+        else {
+          // 其他错误，重新抛出
+          throw error
+        }
+      }
     }
-    else {
-      await toRelease()
-    }
+
     process.exit(0)
   }
   catch (err) {

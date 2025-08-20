@@ -1,5 +1,5 @@
 import process from 'node:process'
-import { blue, green, yellow } from 'kolorist'
+import { blue, green, red, yellow } from 'kolorist'
 import type { Browser, Page } from 'puppeteer'
 import puppeteer from 'puppeteer'
 import type { Ora } from 'ora'
@@ -56,10 +56,12 @@ export async function getLoginScanCode(opts: InputOptions = options) {
 }
 
 /**
- * 操作完成后检查并切换账号
+ * 获取所有可用账号列表
  */
-export async function checkAndSwitchAccountAfterOperation(): Promise<boolean> {
+export async function getAllAvailableAccounts(): Promise<AccountInfo[]> {
   try {
+    spinner.start('正在获取账号列表...')
+
     // 等待页面加载完成
     await sleep(2000)
 
@@ -70,19 +72,19 @@ export async function checkAndSwitchAccountAfterOperation(): Promise<boolean> {
       // 尝试其他可能的选择器
       const altSwitchBtn = await page.$('.menu_box_account_info_item')
       if (!altSwitchBtn) {
-        spinner.stop()
-        // 没有切换账号按钮，直接询问是否继续
-        const shouldContinue: prompts.Answers<'continue'> = await prompts([
-          {
-            type: 'confirm',
-            name: 'continue',
-            message: '是否继续对当前账号进行其他操作？',
-            initial: false,
-          },
-        ], {
-          onCancel,
+        // 没有切换账号按钮，说明只有当前一个账号
+        const currentAccountName = await page.evaluate(() => {
+          const accountElement = document.querySelector('#js_container_box > div.col_side.open.transparent > div > div.menu_box_other > div.menu_box_other_item_wrapper.account_info > div > div.menu_box_account_info > div.menu_box_account_info_item')
+          return accountElement?.textContent?.trim() || '当前账号'
         })
-        return shouldContinue.continue as boolean
+
+        spinner.succeed('获取账号列表完成')
+        return [{
+          name: currentAccountName,
+          email: '',
+          index: 0,
+          display: currentAccountName,
+        }]
       }
     }
 
@@ -92,56 +94,6 @@ export async function checkAndSwitchAccountAfterOperation(): Promise<boolean> {
       return accountElement?.textContent?.trim() || '当前账号'
     })
 
-    spinner.stop()
-
-    // 询问用户下一步操作
-    const nextAction: prompts.Answers<'action'> = await prompts([
-      {
-        type: 'select',
-        name: 'action',
-        message: `当前账号: ${green(currentAccountName)}，请选择下一步操作:`,
-        choices: [
-          { title: '🔄 切换到其他账号继续操作', value: 'switch' },
-          { title: '🔁 继续使用当前账号进行操作', value: 'continue' },
-          { title: '🚪 退出程序', value: 'exit' },
-        ],
-        initial: 0,
-      },
-    ], {
-      onCancel,
-    })
-
-    if (nextAction.action === 'exit')
-      return false
-
-    if (nextAction.action === 'continue')
-      return true
-
-    // 执行切换账号逻辑
-    return await performAccountSwitch()
-  }
-  catch (error) {
-    spinner.warn(`检查账号切换过程中出现问题: ${(error as { message: string })?.message}`)
-    // 出错时询问是否继续
-    const shouldContinue: prompts.Answers<'continue'> = await prompts([
-      {
-        type: 'confirm',
-        name: 'continue',
-        message: '是否继续使用当前账号？',
-        initial: true,
-      },
-    ], {
-      onCancel,
-    })
-    return shouldContinue.continue as boolean
-  }
-}
-
-/**
- * 执行账号切换
- */
-async function performAccountSwitch(): Promise<boolean> {
-  try {
     // 点击切换账号按钮
     let clickSuccess = await page.evaluate(() => {
       const btn = document.querySelector('#js_container_box > div.col_side.open.transparent > div > div.menu_box_other > div.menu_box_other_item_wrapper.account_info > div > div.menu_box_account_info > div.menu_box_account_info_item') as HTMLElement
@@ -173,10 +125,8 @@ async function performAccountSwitch(): Promise<boolean> {
 
     // 等待账号列表弹窗出现
     const accountList = await page.waitForSelector('#app > div.switch_account_dialog > div > div.account_list', { timeout: 10000 })
-    if (!accountList) {
-      spinner.warn('未找到账号列表')
-      return false
-    }
+    if (!accountList)
+      throw new Error('未找到账号列表')
 
     // 获取所有可切换的账号
     const accounts = await page.evaluate(() => {
@@ -193,29 +143,79 @@ async function performAccountSwitch(): Promise<boolean> {
           display: email ? `${name} (${email})` : name,
         }
       })
+    }, currentAccountName)
+
+    // 关闭账号选择弹窗（点击取消或空白区域）
+    await page.evaluate(() => {
+      const cancelBtn = document.querySelector('#app > div.switch_account_dialog .weui-desktop-btn_default')
+      if (cancelBtn) {
+        (cancelBtn as HTMLElement).click()
+      }
+      else {
+        // 如果没有取消按钮，点击遮罩层关闭
+        const overlay = document.querySelector('#app > div.switch_account_dialog')
+        if (overlay)
+          (overlay as HTMLElement).click()
+      }
     })
 
-    if (accounts.length === 0) {
-      spinner.warn('未找到可切换的账号')
+    // 等待弹窗关闭
+    await page.waitForSelector('#app > div.switch_account_dialog', { hidden: true, timeout: 5000 }).catch(() => {
+      // 如果等待失败，尝试按ESC键关闭
+      return page.keyboard.press('Escape')
+    })
+
+    spinner.succeed('获取账号列表完成')
+    return accounts
+  }
+  catch (error) {
+    spinner.fail(`获取账号列表失败: ${(error as { message: string })?.message}`)
+    throw error
+  }
+}
+
+/**
+ * 切换到指定账号
+ */
+export async function switchToAccount(account: AccountInfo): Promise<boolean> {
+  try {
+    spinner.start('正在切换账号...')
+
+    // 点击切换账号按钮
+    let clickSuccess = await page.evaluate(() => {
+      const btn = document.querySelector('#js_container_box > div.col_side.open.transparent > div > div.menu_box_other > div.menu_box_other_item_wrapper.account_info > div > div.menu_box_account_info > div.menu_box_account_info_item') as HTMLElement
+      if (btn) {
+        btn.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        setTimeout(() => btn.click(), 300)
+        return true
+      }
       return false
+    })
+
+    // 如果主选择器失败，尝试备用选择器
+    if (!clickSuccess) {
+      clickSuccess = await page.evaluate(() => {
+        const btn = document.querySelector('.menu_box_account_info_item') as HTMLElement
+        if (btn) {
+          btn.scrollIntoView({ behavior: 'smooth', block: 'center' })
+          setTimeout(() => btn.click(), 300)
+          return true
+        }
+        return false
+      })
     }
 
-    // 让用户选择要切换的账号
-    const selectedAccount: prompts.Answers<'accountIndex'> = await prompts([
-      {
-        type: 'select',
-        name: 'accountIndex',
-        message: '请选择要切换的账号:',
-        choices: accounts.map((account, index) => ({
-          title: blue(account.display),
-          description: account.email ? `邮箱: ${account.email}` : '',
-          value: index,
-        })),
-        initial: 0,
-      },
-    ], {
-      onCancel,
-    })
+    if (!clickSuccess)
+      throw new Error('无法点击切换账号按钮')
+
+    await sleep(1500)
+
+    // 等待账号列表弹窗出现
+    const accountList = await page.waitForSelector('#app > div.switch_account_dialog > div > div.account_list', { timeout: 10000 })
+    if (!accountList)
+      throw new Error('未找到账号列表')
+
+    await sleep(1000)
 
     // 点击选中的账号
     await page.evaluate((index: number) => {
@@ -227,9 +227,7 @@ async function performAccountSwitch(): Promise<boolean> {
           selectedItem.click()
         }, 300)
       }
-    }, selectedAccount.accountIndex)
-
-    spinner.start('正在切换账号...')
+    }, account.index)
 
     // 等待账号切换弹窗消失
     try {
@@ -249,16 +247,13 @@ async function performAccountSwitch(): Promise<boolean> {
     await sleep(3000)
 
     // 获取切换后的账号名称
-    const newAccountName = await page.evaluate(() => {
-      const accountElement = document.querySelector('#js_container_box > div.col_side.open.transparent > div > div.menu_box_other > div.menu_box_other_item_wrapper.account_info > div > div.menu_box_account_info > div.menu_box_account_info_item')
-      return accountElement?.textContent?.trim() || '新账号'
-    })
+    const newAccountName = account.display
 
     spinner.succeed(`账号切换成功: ${green(newAccountName)}`)
     return true
   }
   catch (error) {
-    spinner.warn(`切换账号失败: ${(error as { message: string })?.message}`)
+    spinner.fail(`切换账号失败: ${(error as { message: string })?.message}`)
     return false
   }
 }
@@ -383,7 +378,6 @@ export async function jumpToConfirmPage() {
       }
     }
   })
-  // 检查是否有两小时急速审核 TODO
 
   // 关闭当前页面
   await sleep(1000)
@@ -465,92 +459,218 @@ export async function toRelease() {
     spinner.succeed('发布成功')
 }
 
+/**
+ * 对单个账号执行操作
+ */
+async function performOperationForAccount(account: AccountInfo, actionType: ACTION): Promise<boolean> {
+  try {
+    spinner.info(`开始处理账号: ${green(account.display)}`)
+
+    await jumpToVersions()
+
+    // 第一个为当前账户，无需切换
+    if (account.index > 0) {
+      const switchSuccess = await switchToAccount(account)
+      if (!switchSuccess) {
+        spinner.warn(`切换到账号 ${account.display} 失败，跳过该账号`)
+        return false
+      }
+      await jumpToVersions()
+    }
+
+    if (actionType === ACTION.REVIEW) {
+      await jumpToConfirmPage()
+      await toSubmitAudit()
+      spinner.succeed(`✅ 账号 ${green(account.display)} 提审操作完成`)
+    }
+    else {
+      await toRelease()
+      spinner.succeed(`✅ 账号 ${green(account.display)} 发布操作完成`)
+    }
+
+    // 跳转回版本管理页面，为下一个账号做准备
+    const token = new URL(page.url()).searchParams.get('token')
+    await page.goto(`https://mp.weixin.qq.com/wxamp/wacodepage/getcodepage?token=${token}&lang=zh_CN`)
+
+    return true
+  }
+  catch (error) {
+    const errorMessage = (error as { message: string })?.message || '未知错误'
+
+    if (errorMessage.includes('用户取消')) {
+      spinner.warn(`账号 ${account.display} 操作被用户取消`)
+      return false
+    }
+
+    spinner.fail(`账号 ${account.display} 操作失败: ${errorMessage}`)
+    return false
+  }
+}
+
 export default async function weixinRobot(opts: InputOptions) {
   options = opts
   try {
+    // 1. 登录
     await getLoginScanCode()
+    await jumpToVersions()
 
-    // 主操作循环，允许用户在完成操作后切换账号继续操作
-    while (true) {
+    // 2. 获取所有可用账号
+    const allAccounts = await getAllAvailableAccounts()
+
+    if (allAccounts.length === 0) {
+      spinner.fail('未找到任何可用账号')
+      process.exit(1)
+    }
+
+    // 3. 让用户选择要操作的账号（多选）
+    spinner.stop()
+    const selectedAccounts: prompts.Answers<'accounts'> = await prompts([
+      {
+        type: 'multiselect',
+        name: 'accounts',
+        message: `请选择要进行${options.action === ACTION.REVIEW ? '提审' : '发布'}操作的账号 (使用空格键选择/取消选择，回车确认):`,
+        choices: allAccounts.map(account => ({
+          title: blue(account.display),
+          description: account.email ? `邮箱: ${account.email}` : '',
+          value: account.index,
+        })),
+        min: 1, // 至少选择一个账号
+        hint: '- 使用方向键移动, 空格键选择/取消选择, 回车确认',
+      },
+    ], {
+      onCancel,
+    })
+
+    if (!selectedAccounts.accounts || (selectedAccounts.accounts as number[]).length === 0) {
+      spinner.info('未选择任何账号，程序退出')
+      process.exit(0)
+    }
+
+    // 4. 获取选中的账号信息
+    const selectedAccountInfos = allAccounts.filter(account =>
+      (selectedAccounts.accounts as number[]).includes(account.index),
+    )
+
+    // 5. 确认操作
+    const actionText = options.action === ACTION.REVIEW ? '提审' : '发布'
+    const confirmResult: prompts.Answers<'confirm'> = await prompts([
+      {
+        type: 'confirm',
+        name: 'confirm',
+        message: `确认对以下 ${selectedAccountInfos.length} 个账号执行${actionText}操作吗？\n${selectedAccountInfos.map(acc => `  • ${acc.display}`).join('\n')}`,
+        initial: true,
+      },
+    ], {
+      onCancel,
+    })
+
+    if (!confirmResult.confirm) {
+      spinner.info('操作已取消，程序退出')
+      process.exit(0)
+    }
+
+    // 6. 按顺序执行操作
+    spinner.info(`开始批量${actionText}操作，共 ${selectedAccountInfos.length} 个账号`)
+
+    const results = {
+      success: [] as AccountInfo[],
+      failed: [] as AccountInfo[],
+      skipped: [] as AccountInfo[],
+    }
+
+    for (let i = 0; i < selectedAccountInfos.length; i++) {
+      const account = selectedAccountInfos[i]
+      spinner.info(`正在处理第 ${i + 1}/${selectedAccountInfos.length} 个账号...`)
+
       try {
-        await jumpToVersions()
-
-        if (options.action === ACTION.REVIEW) {
-          await jumpToConfirmPage()
-          await toSubmitAudit()
-          spinner.succeed('✅ 提审操作完成')
-        }
-        else {
-          await toRelease()
-          spinner.succeed('✅ 发布操作完成')
-        }
-
-        // 跳转到getcodepage
-        const token = new URL(page.url()).searchParams.get('token')
-        await page.goto(`https://mp.weixin.qq.com/wxamp/wacodepage/getcodepage?token=${token}&lang=zh_CN`)
-
-        // 操作完成后询问是否切换账号继续操作
-        const shouldContinue = await checkAndSwitchAccountAfterOperation()
-        if (!shouldContinue) {
-          spinner.info('程序结束，感谢使用！')
-          break
-        }
+        const success = await performOperationForAccount(account, options.action)
+        if (success)
+          results.success.push(account)
+        else
+          results.failed.push(account)
       }
       catch (error) {
         const errorMessage = (error as { message: string })?.message || '未知错误'
 
-        // 如果是用户取消操作，询问是否切换账号或退出
         if (errorMessage.includes('用户取消')) {
+          // 用户取消了当前账号的操作，询问是否继续处理其他账号
           spinner.stop()
-          const nextAction: prompts.Answers<'action'> = await prompts([
+          const continueResult: prompts.Answers<'continue'> = await prompts([
             {
-              type: 'select',
-              name: 'action',
-              message: '操作已取消，请选择下一步:',
-              choices: [
-                { title: '🔄 切换到其他账号继续操作', value: 'switch' },
-                { title: '🔁 继续使用当前账号进行操作', value: 'continue' },
-                { title: '🚪 退出程序', value: 'exit' },
-              ],
-              initial: 1, // 默认选择继续当前账号
+              type: 'confirm',
+              name: 'continue',
+              message: `账号 ${account.display} 操作被取消，是否继续处理剩余的 ${selectedAccountInfos.length - i - 1} 个账号？`,
+              initial: true,
             },
           ], {
             onCancel,
           })
 
-          if (nextAction.action === 'exit') {
-            spinner.info('程序结束，感谢使用！')
+          if (!continueResult.continue) {
+            results.skipped.push(...selectedAccountInfos.slice(i))
             break
           }
-          else if (nextAction.action === 'switch') {
-            const switchSuccess = await performAccountSwitch()
-            if (!switchSuccess) {
-              // 切换失败，询问是否继续
-              const shouldContinue: prompts.Answers<'continue'> = await prompts([
-                {
-                  type: 'confirm',
-                  name: 'continue',
-                  message: '切换账号失败，是否继续使用当前账号？',
-                  initial: true,
-                },
-              ], {
-                onCancel,
-              })
-              if (!shouldContinue.continue) {
-                spinner.info('程序结束，感谢使用！')
-                break
-              }
-            }
+          else {
+            results.failed.push(account)
+            continue
           }
-          // 如果选择 continue 或切换成功，继续循环
-          continue
         }
         else {
-          // 其他错误，重新抛出
-          throw error
+          spinner.fail(`账号 ${account.display} 处理失败: ${errorMessage}`)
+          results.failed.push(account)
+
+          // 如果还有剩余账号，询问是否继续
+          if (i < selectedAccountInfos.length - 1) {
+            spinner.stop()
+            const continueResult: prompts.Answers<'continue'> = await prompts([
+              {
+                type: 'confirm',
+                name: 'continue',
+                message: `是否继续处理剩余的 ${selectedAccountInfos.length - i - 1} 个账号？`,
+                initial: true,
+              },
+            ], {
+              onCancel,
+            })
+
+            if (!continueResult.continue) {
+              results.skipped.push(...selectedAccountInfos.slice(i + 1))
+              break
+            }
+          }
         }
       }
     }
+
+    // 7. 显示操作结果汇总
+    spinner.stop()
+    console.log(`\n${'='.repeat(50)}`)
+    console.log(`📊 批量${actionText}操作完成！`)
+    console.log('='.repeat(50))
+
+    if (results.success.length > 0) {
+      console.log(`\n✅ 成功 (${results.success.length}个):`)
+      results.success.forEach((account) => {
+        console.log(`  • ${green(account.display)}`)
+      })
+    }
+
+    if (results.failed.length > 0) {
+      console.log(`\n❌ 失败 (${results.failed.length}个):`)
+      results.failed.forEach((account) => {
+        console.log(`  • ${red(account.display)}`)
+      })
+    }
+
+    if (results.skipped.length > 0) {
+      console.log(`\n⏭️  跳过 (${results.skipped.length}个):`)
+      results.skipped.forEach((account) => {
+        console.log(`  • ${yellow(account.display)}`)
+      })
+    }
+
+    console.log(`\n${'='.repeat(50)}`)
+    console.log('感谢使用！')
 
     process.exit(0)
   }

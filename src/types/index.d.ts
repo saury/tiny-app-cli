@@ -8,4 +8,11 @@ declare global {
     headless: PuppeteerLaunchOptions['headless']
     forceSubmit?: boolean
   }
+
+  interface AccountInfo {
+    name: string
+    email: string
+    index: number
+    display: string
+  }
 }

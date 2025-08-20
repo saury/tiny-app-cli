@@ -15,7 +15,7 @@ export default async function main(options: InputOptions) {
       name: 'platform',
       choices: [
         { title: green('微信'), description: '登录微信公众平台', value: PLATFORM.WEIXIN },
-        { title: blue('支付宝'), description: '登录支付宝公众平台', value: PLATFORM.ALIPAY },
+        // { title: blue('支付宝'), description: '登录支付宝公众平台', value: PLATFORM.ALIPAY },
       ],
       initial: 0,
     },

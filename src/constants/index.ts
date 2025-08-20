@@ -13,6 +13,7 @@ export enum PLATFORM {
 export enum ACTION {
   REVIEW = 'review',
   RELEASE = 'release',
+  INSPECT = 'inspect',
 }
 
 export enum BOOL {

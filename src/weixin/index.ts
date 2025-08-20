@@ -418,6 +418,48 @@ export async function toSubmitAudit() {
 }
 
 /**
+ * 检查审核版本状态
+ */
+export async function checkReviewStatus(): Promise<{ version: string, status: string } | null> {
+  try {
+    spinner.start('正在检查审核版本状态...')
+
+    // 等待页面加载
+    await sleep(5000)
+
+    // 检查是否存在审核版本
+    const reviewVersionElement = await page.$('#js_container_box > div.col_main > div > div:nth-child(4) > div.main_bd > span > div.code_mod.mod_default_box.code_version_test > div.mod_default_bd.default_box.test_version > div > div > div.code_version_log_hd > div > p.simple_preview_value')
+
+    if (!reviewVersionElement) {
+      spinner.info('当前没有审核版本')
+      return null
+    }
+
+    // 获取版本号
+    const version = await page.evaluate((el) => {
+      return el?.textContent?.trim() || ''
+    }, reviewVersionElement)
+
+    // 获取状态
+    const statusElement = await page.$('#js_container_box > div.col_main > div > div:nth-child(4) > div.main_bd > span > div.code_mod.mod_default_box.code_version_test > div.mod_default_bd.default_box.test_version > div > div > div.code_version_log_hd > div > p:nth-child(3) > span.status_tag')
+
+    let status = '未知状态'
+    if (statusElement) {
+      status = await page.evaluate((el) => {
+        return el?.textContent?.trim() || '未知状态'
+      }, statusElement)
+    }
+
+    spinner.succeed(`审核版本检查完成`)
+    return { version, status }
+  }
+  catch (error) {
+    spinner.fail(`检查审核版本状态失败: ${(error as { message: string })?.message}`)
+    return null
+  }
+}
+
+/**
  * 去发布
  */
 export async function toRelease() {
@@ -462,7 +504,7 @@ export async function toRelease() {
 /**
  * 对单个账号执行操作
  */
-async function performOperationForAccount(account: AccountInfo, actionType: ACTION): Promise<boolean> {
+async function performOperationForAccount(account: AccountInfo, actionType: ACTION): Promise<boolean | { version: string, status: string } | null> {
   try {
     spinner.info(`开始处理账号: ${green(account.display)}`)
 
@@ -482,10 +524,30 @@ async function performOperationForAccount(account: AccountInfo, actionType: ACTI
       await jumpToConfirmPage()
       await toSubmitAudit()
       spinner.succeed(`✅ 账号 ${green(account.display)} 提审操作完成`)
+
+      // 跳转回版本管理页面，为下一个账号做准备
+      const token = new URL(page.url()).searchParams.get('token')
+      await page.goto(`https://mp.weixin.qq.com/wxamp/wacodepage/getcodepage?token=${token}&lang=zh_CN`)
+      return true
     }
-    else {
+    else if (actionType === ACTION.RELEASE) {
       await toRelease()
       spinner.succeed(`✅ 账号 ${green(account.display)} 发布操作完成`)
+
+      // 跳转回版本管理页面，为下一个账号做准备
+      const token = new URL(page.url()).searchParams.get('token')
+      await page.goto(`https://mp.weixin.qq.com/wxamp/wacodepage/getcodepage?token=${token}&lang=zh_CN`)
+      return true
+    }
+    else if (actionType === ACTION.INSPECT) {
+      const reviewStatus = await checkReviewStatus()
+      spinner.succeed(`✅ 账号 ${green(account.display)} 自检操作完成`)
+
+      // 跳转回版本管理页面，为下一个账号做准备
+      const token = new URL(page.url()).searchParams.get('token')
+      await page.goto(`https://mp.weixin.qq.com/wxamp/wacodepage/getcodepage?token=${token}&lang=zh_CN`)
+
+      return reviewStatus
     }
 
     // 跳转回版本管理页面，为下一个账号做准备
@@ -524,11 +586,12 @@ export default async function weixinRobot(opts: InputOptions) {
 
     // 3. 让用户选择要操作的账号（多选）
     spinner.stop()
+    const actionText = options.action === ACTION.REVIEW ? '提审' : options.action === ACTION.RELEASE ? '发布' : '自检'
     const selectedAccounts: prompts.Answers<'accounts'> = await prompts([
       {
         type: 'multiselect',
         name: 'accounts',
-        message: `请选择要进行${options.action === ACTION.REVIEW ? '提审' : '发布'}操作的账号 (使用空格键选择/取消选择，回车确认):`,
+        message: `请选择要进行${actionText}操作的账号 (使用空格键选择/取消选择，回车确认):`,
         choices: allAccounts.map(account => ({
           title: blue(account.display),
           description: account.email ? `邮箱: ${account.email}` : '',
@@ -552,7 +615,6 @@ export default async function weixinRobot(opts: InputOptions) {
     )
 
     // 5. 确认操作
-    const actionText = options.action === ACTION.REVIEW ? '提审' : '发布'
     const confirmResult: prompts.Answers<'confirm'> = await prompts([
       {
         type: 'confirm',
@@ -576,6 +638,7 @@ export default async function weixinRobot(opts: InputOptions) {
       success: [] as AccountInfo[],
       failed: [] as AccountInfo[],
       skipped: [] as AccountInfo[],
+      inspectResults: [] as Array<{ account: AccountInfo, version: string, status: string }>,
     }
 
     for (let i = 0; i < selectedAccountInfos.length; i++) {
@@ -583,11 +646,38 @@ export default async function weixinRobot(opts: InputOptions) {
       spinner.info(`正在处理第 ${i + 1}/${selectedAccountInfos.length} 个账号...`)
 
       try {
-        const success = await performOperationForAccount(account, options.action)
-        if (success)
-          results.success.push(account)
-        else
-          results.failed.push(account)
+        const result = await performOperationForAccount(account, options.action)
+
+        if (options.action === ACTION.INSPECT) {
+          // 自检模式的特殊处理
+          if (result && typeof result === 'object' && 'version' in result) {
+            results.inspectResults.push({
+              account,
+              version: result.version,
+              status: result.status,
+            })
+            results.success.push(account)
+          }
+          else if (result === null) {
+            // 没有审核版本，也算成功
+            results.inspectResults.push({
+              account,
+              version: '无',
+              status: '无审核版本',
+            })
+            results.success.push(account)
+          }
+          else {
+            results.failed.push(account)
+          }
+        }
+        else {
+          // 提审和发布模式的处理
+          if (result === true)
+            results.success.push(account)
+          else
+            results.failed.push(account)
+        }
       }
       catch (error) {
         const errorMessage = (error as { message: string })?.message || '未知错误'
@@ -648,25 +738,41 @@ export default async function weixinRobot(opts: InputOptions) {
     console.log(`📊 批量${actionText}操作完成！`)
     console.log('='.repeat(50))
 
-    if (results.success.length > 0) {
-      console.log(`\n✅ 成功 (${results.success.length}个):`)
-      results.success.forEach((account) => {
-        console.log(`  • ${green(account.display)}`)
+    if (options.action === ACTION.INSPECT && results.inspectResults.length > 0) {
+      console.log(`\n🔍 自检结果 (${results.inspectResults.length}个):`)
+      results.inspectResults.forEach((item) => {
+        const statusColor = item.status === '审核通过待发布'
+          ? green
+          : item.status === '审核中'
+            ? yellow
+            : item.status === '审核不通过' ? red : blue
+        console.log(`  • ${blue(item.account.display)}`)
+        console.log(`    版本号: ${item.version}`)
+        console.log(`    状态: ${statusColor(item.status)}`)
+        console.log('')
       })
     }
+    else {
+      if (results.success.length > 0) {
+        console.log(`\n✅ 成功 (${results.success.length}个):`)
+        results.success.forEach((account) => {
+          console.log(`  • ${green(account.display)}`)
+        })
+      }
 
-    if (results.failed.length > 0) {
-      console.log(`\n❌ 失败 (${results.failed.length}个):`)
-      results.failed.forEach((account) => {
-        console.log(`  • ${red(account.display)}`)
-      })
-    }
+      if (results.failed.length > 0) {
+        console.log(`\n❌ 失败 (${results.failed.length}个):`)
+        results.failed.forEach((account) => {
+          console.log(`  • ${red(account.display)}`)
+        })
+      }
 
-    if (results.skipped.length > 0) {
-      console.log(`\n⏭️  跳过 (${results.skipped.length}个):`)
-      results.skipped.forEach((account) => {
-        console.log(`  • ${yellow(account.display)}`)
-      })
+      if (results.skipped.length > 0) {
+        console.log(`\n⏭️  跳过 (${results.skipped.length}个):`)
+        results.skipped.forEach((account) => {
+          console.log(`  • ${yellow(account.display)}`)
+        })
+      }
     }
 
     console.log(`\n${'='.repeat(50)}`)

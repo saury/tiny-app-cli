@@ -26,6 +26,7 @@ export default async function main(options: InputOptions) {
       choices: [
         { title: '提审', description: '提审小程序', value: ACTION.REVIEW },
         { title: red('发布'), description: '发布小程序', value: ACTION.RELEASE },
+        { title: blue('自检'), description: '检查审核版本状态', value: ACTION.INSPECT },
       ],
       initial: 0,
     },

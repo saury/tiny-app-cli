@@ -283,7 +283,7 @@ async function getSubmitReviewButton() {
   let submitReviewBtn = await page.waitForSelector(submitReviewBtnSelector)
   const codeVersions = await page.$$('.mod_default_box.code_version_dev .code_version_log')
   // 优先选择体验版进行提交审核
-  if (codeVersions.length > 1) {
+  if (codeVersions.length > 0) {
     for await (const item of codeVersions) {
       const hasExpVersionTag = await item.evaluate(el => el.querySelector('.js_show_exp_version') !== null)
       if (hasExpVersionTag) {

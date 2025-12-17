@@ -15,6 +15,150 @@ let spinner: Ora
 let options: InputOptions
 
 /**
+ * 通用重试机制
+ */
+async function retryOperation<T>(
+  operation: () => Promise<T>,
+  operationName: string,
+  maxRetries = 3,
+  delayMs = 2000,
+): Promise<T> {
+  let lastError: Error | null = null
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      if (attempt > 1) {
+        spinner.info(`重试第 ${attempt - 1} 次: ${operationName}`)
+        await sleep(delayMs)
+      }
+      return await operation()
+    }
+    catch (error) {
+      lastError = error as Error
+      const errorMessage = (error as { message: string })?.message || '未知错误'
+
+      if (attempt === maxRetries) {
+        spinner.fail(`${operationName} 失败 (已重试 ${maxRetries} 次): ${errorMessage}`)
+        break
+      }
+
+      spinner.warn(`${operationName} 失败 (尝试 ${attempt}/${maxRetries}): ${errorMessage}`)
+    }
+  }
+
+  throw lastError || new Error(`${operationName} 失败`)
+}
+
+/**
+ * 检查页面是否有效
+ */
+function isPageValid(): boolean {
+  try {
+    return page && !page.isClosed()
+  }
+  catch {
+    return false
+  }
+}
+
+/**
+ * 安全地导航到指定 URL
+ */
+async function safeGoto(url: string, description = '页面导航'): Promise<void> {
+  try {
+    // 首先尝试使用 domcontentloaded，更快
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 })
+  }
+  catch (error) {
+    const errorMessage = (error as { message: string })?.message || ''
+    if (errorMessage.includes('timeout')) {
+      // 如果超时，尝试使用更宽松的策略
+      spinner.warn(`${description}超时，尝试继续...`)
+      try {
+        await page.goto(url, { waitUntil: 'load', timeout: 20000 })
+      }
+      catch {
+        // 最后一招：不等待任何事件
+        await page.goto(url, { waitUntil: 'networkidle2', timeout: 15000 })
+      }
+    }
+    else {
+      throw error
+    }
+  }
+  // 给页面一些时间渲染
+  await sleep(2000)
+}
+
+/**
+ * 获取当前页面的token，支持多种场景
+ */
+async function getToken(): Promise<string> {
+  // 验证页面状态
+  if (!isPageValid())
+    throw new Error('页面已关闭或无效')
+
+  const currentUrl = page.url()
+
+  // 场景1: URL中有token参数
+  const urlToken = new URL(currentUrl).searchParams.get('token')
+  if (urlToken)
+    return urlToken
+
+  // 场景2: 从页面元素中获取token（登录后的首页）
+  try {
+    const tokenFromPage = await page.evaluate(() => {
+      // 尝试从页面的链接中提取token
+      const links = document.querySelectorAll('a[href*="token="]')
+      for (const link of links) {
+        const href = (link as HTMLAnchorElement).href
+        const match = href.match(/token=([^&]+)/)
+        if (match?.[1])
+          return match[1]
+      }
+      return null
+    })
+
+    if (tokenFromPage)
+      return tokenFromPage
+  }
+  catch (error) {
+    // 继续尝试其他方法
+  }
+
+  // 场景3: 等待页面跳转到带token的页面
+  spinner.info('等待页面跳转...')
+  await sleep(3000)
+
+  const newUrl = page.url()
+  const newToken = new URL(newUrl).searchParams.get('token')
+  if (newToken)
+    return newToken
+
+  // 场景4: 尝试从cookie或localStorage获取
+  try {
+    const tokenFromStorage = await page.evaluate((): string | null => {
+      // 尝试从localStorage获取
+      const localToken = localStorage.getItem('token')
+      if (localToken)
+        return localToken
+
+      // 尝试从全局变量获取
+      const win = window as Window & { token?: string }
+      return win.token || null
+    })
+
+    if (tokenFromStorage)
+      return tokenFromStorage
+  }
+  catch (error) {
+    // 继续
+  }
+
+  throw new Error('无法获取token，请检查登录状态')
+}
+
+/**
  * 获取微信图片二维码
  */
 export async function getLoginScanCode(opts: InputOptions = options) {
@@ -53,6 +197,22 @@ export async function getLoginScanCode(opts: InputOptions = options) {
   console.log(scanCode)
   await page.waitForSelector('.weui-desktop-icon.weui-desktop-icon__success.weui-desktop-icon__large', { timeout: 0 })
   spinner.succeed('扫码成功')
+
+  // 等待页面跳转到管理后台
+  spinner.start('正在进入管理后台...')
+  await sleep(5000) // 等待页面完全加载
+
+  // 确保页面已经跳转到管理后台
+  const currentUrl = page.url()
+  if (!currentUrl.includes('mp.weixin.qq.com')) {
+    spinner.info('等待页面跳转...')
+    await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {
+      // 忽略超时错误
+    })
+    await sleep(3000)
+  }
+
+  spinner.succeed('进入管理后台成功')
 }
 
 /**
@@ -61,6 +221,10 @@ export async function getLoginScanCode(opts: InputOptions = options) {
 export async function getAllAvailableAccounts(): Promise<AccountInfo[]> {
   try {
     spinner.start('正在获取账号列表...')
+
+    // 验证页面状态
+    if (!isPageValid())
+      throw new Error('页面已关闭或无效')
 
     // 等待页面加载完成
     await sleep(2000)
@@ -169,7 +333,15 @@ export async function getAllAvailableAccounts(): Promise<AccountInfo[]> {
     return accounts
   }
   catch (error) {
-    spinner.fail(`获取账号列表失败: ${(error as { message: string })?.message}`)
+    const errorMessage = (error as { message: string })?.message || '未知错误'
+    spinner.fail(`获取账号列表失败: ${errorMessage}`)
+
+    // 尝试记录更多调试信息
+    if (__DEV__) {
+      console.error('详细错误信息:', error)
+      console.error('当前页面URL:', isPageValid() ? page.url() : '页面已关闭')
+    }
+
     throw error
   }
 }
@@ -178,8 +350,12 @@ export async function getAllAvailableAccounts(): Promise<AccountInfo[]> {
  * 切换到指定账号
  */
 export async function switchToAccount(account: AccountInfo): Promise<boolean> {
-  try {
+  return retryOperation(async () => {
     spinner.start('正在切换账号...')
+
+    // 验证页面状态
+    if (!isPageValid())
+      throw new Error('页面已关闭或无效')
 
     // 点击切换账号按钮
     let clickSuccess = await page.evaluate(() => {
@@ -251,26 +427,41 @@ export async function switchToAccount(account: AccountInfo): Promise<boolean> {
 
     spinner.succeed(`账号切换成功: ${green(newAccountName)}`)
     return true
-  }
-  catch (error) {
+  }, `切换到账号 ${account.display}`, 2, 3000).catch((error) => {
     spinner.fail(`切换账号失败: ${(error as { message: string })?.message}`)
     return false
-  }
+  })
 }
 
 /**
  * 跳转到版本列表
  */
 export async function jumpToVersions() {
-  spinner.start('正在跳转到版本管理页面...')
-  const versionManage = await page.waitForSelector('.menu_item .tab-bar__wrap.tab-bar__wrap--submenu', { timeout: 0 })
-  if (!versionManage) {
-    spinner.fail('未找到版本管理')
-    throw new Error('未找到版本管理')
+  try {
+    spinner.start('正在跳转到版本管理页面...')
+
+    // 验证页面是否仍然打开
+    if (page.isClosed())
+      throw new Error('页面已关闭，无法跳转到版本管理')
+
+    // 使用智能token获取函数
+    const token = await getToken()
+
+    // 使用安全导航函数跳转到版本管理页面
+    const targetUrl = `https://mp.weixin.qq.com/wxamp/wacodepage/getcodepage?token=${token}&lang=zh_CN`
+    await safeGoto(targetUrl, '跳转到版本管理页面')
+
+    // 验证页面是否成功跳转
+    if (!page.url().includes('wacodepage'))
+      throw new Error('页面跳转失败')
+
+    spinner.succeed('跳转到版本管理页面成功')
   }
-  spinner.start('正在跳转到版本管理页面...')
-  const token = new URL(page.url()).searchParams.get('token')
-  await page.goto(`https://mp.weixin.qq.com/wxamp/wacodepage/getcodepage?token=${token}&lang=zh_CN`)
+  catch (error) {
+    const errorMessage = (error as { message: string })?.message || '未知错误'
+    spinner.fail(`跳转到版本管理页面失败: ${errorMessage}`)
+    throw error
+  }
 }
 
 async function getSubmitReviewButton() {
@@ -508,6 +699,10 @@ async function performOperationForAccount(account: AccountInfo, actionType: ACTI
   try {
     spinner.info(`开始处理账号: ${green(account.display)}`)
 
+    // 验证页面状态
+    if (!isPageValid())
+      throw new Error('页面已关闭或无效，无法继续操作')
+
     await jumpToVersions()
 
     // 第一个为当前账户，无需切换
@@ -526,8 +721,14 @@ async function performOperationForAccount(account: AccountInfo, actionType: ACTI
       spinner.succeed(`✅ 账号 ${green(account.display)} 提审操作完成`)
 
       // 跳转回版本管理页面，为下一个账号做准备
-      const token = new URL(page.url()).searchParams.get('token')
-      await page.goto(`https://mp.weixin.qq.com/wxamp/wacodepage/getcodepage?token=${token}&lang=zh_CN`)
+      await retryOperation(async () => {
+        if (!isPageValid())
+          throw new Error('页面已关闭')
+
+        const token = await getToken()
+        await safeGoto(`https://mp.weixin.qq.com/wxamp/wacodepage/getcodepage?token=${token}&lang=zh_CN`, '返回版本管理页面')
+      }, '返回版本管理页面', 2, 2000)
+
       return true
     }
     else if (actionType === ACTION.RELEASE) {
@@ -535,8 +736,14 @@ async function performOperationForAccount(account: AccountInfo, actionType: ACTI
       spinner.succeed(`✅ 账号 ${green(account.display)} 发布操作完成`)
 
       // 跳转回版本管理页面，为下一个账号做准备
-      const token = new URL(page.url()).searchParams.get('token')
-      await page.goto(`https://mp.weixin.qq.com/wxamp/wacodepage/getcodepage?token=${token}&lang=zh_CN`)
+      await retryOperation(async () => {
+        if (!isPageValid())
+          throw new Error('页面已关闭')
+
+        const token = await getToken()
+        await safeGoto(`https://mp.weixin.qq.com/wxamp/wacodepage/getcodepage?token=${token}&lang=zh_CN`, '返回版本管理页面')
+      }, '返回版本管理页面', 2, 2000)
+
       return true
     }
     else if (actionType === ACTION.INSPECT) {
@@ -544,15 +751,28 @@ async function performOperationForAccount(account: AccountInfo, actionType: ACTI
       spinner.succeed(`✅ 账号 ${green(account.display)} 自检操作完成`)
 
       // 跳转回版本管理页面，为下一个账号做准备
-      const token = new URL(page.url()).searchParams.get('token')
-      await page.goto(`https://mp.weixin.qq.com/wxamp/wacodepage/getcodepage?token=${token}&lang=zh_CN`)
+      await retryOperation(async () => {
+        if (!isPageValid())
+          throw new Error('页面已关闭')
+
+        const token = await getToken()
+        await safeGoto(`https://mp.weixin.qq.com/wxamp/wacodepage/getcodepage?token=${token}&lang=zh_CN`, '返回版本管理页面')
+      }, '返回版本管理页面', 2, 2000)
 
       return reviewStatus
     }
 
     // 跳转回版本管理页面，为下一个账号做准备
-    const token = new URL(page.url()).searchParams.get('token')
-    await page.goto(`https://mp.weixin.qq.com/wxamp/wacodepage/getcodepage?token=${token}&lang=zh_CN`)
+    await retryOperation(async () => {
+      if (!isPageValid())
+        throw new Error('页面已关闭')
+
+      const token = new URL(page.url()).searchParams.get('token')
+      if (!token)
+        throw new Error('无法获取token')
+
+      await safeGoto(`https://mp.weixin.qq.com/wxamp/wacodepage/getcodepage?token=${token}&lang=zh_CN`, '返回版本管理页面')
+    }, '返回版本管理页面', 2, 2000)
 
     return true
   }
@@ -565,6 +785,13 @@ async function performOperationForAccount(account: AccountInfo, actionType: ACTI
     }
 
     spinner.fail(`账号 ${account.display} 操作失败: ${errorMessage}`)
+
+    // 尝试记录更多调试信息
+    if (__DEV__) {
+      console.error('详细错误信息:', error)
+      console.error('当前页面URL:', isPageValid() ? page.url() : '页面已关闭')
+    }
+
     return false
   }
 }

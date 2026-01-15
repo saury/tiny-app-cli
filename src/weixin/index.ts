@@ -169,18 +169,18 @@ export async function getLoginScanCode(opts: InputOptions = options) {
   await page.goto(WEIXIN_URL)
   const imgSelector = '.login_frame.input_login'
   const loginCode = await page.waitForSelector(imgSelector)
-  await page.evaluate(() => {
-    return new Promise<void>((resolve, reject) => {
-      const el = document.querySelector<HTMLImageElement>('.login__type__container__scan__qrcode')
-      if (el) {
-        el.onload = () => resolve()
-        el.onerror = reject
-      }
-      else {
-        reject(new Error('登录失败'))
-      }
-    })
-  })
+  // await page.evaluate(() => {
+  //   return new Promise<void>((resolve, reject) => {
+  //     const el = document.querySelector<HTMLImageElement>('.login__type__container__scan__qrcode')
+  //     if (el) {
+  //       el.onload = () => resolve()
+  //       el.onerror = reject
+  //     }
+  //     else {
+  //       reject(new Error('登录失败'))
+  //     }
+  //   })
+  // })
   const loginCodeImagePath = pathResolve('../cache/login-qr.png')
   const getScanCode = async (): Promise<string> => {
     await loginCode?.screenshot({ path: loginCodeImagePath, type: 'png' })
@@ -571,9 +571,9 @@ export async function jumpToConfirmPage() {
   })
 
   // 关闭当前页面
-  await sleep(1000)
+  await sleep(2000)
   await page.close()
-  await sleep(1000)
+  await sleep(2000)
   // 切换提交审核页面
   const pages = await browser.pages()
   let flag = false
